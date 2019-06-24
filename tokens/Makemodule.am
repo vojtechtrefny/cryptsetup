@@ -1,0 +1,5 @@
+EXTRA_DIST += tokens/libcryptsetup-token.sym
+
+TOKENS_LDFLAGS = $(AM_LDFLAGS) -no-undefined \
+	-Wl,--version-script=$(top_srcdir)/tokens/libcryptsetup-token.sym \
+	-version-info 0:0:0

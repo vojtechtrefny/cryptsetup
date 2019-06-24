@@ -40,6 +40,7 @@ include lib/Makemodule.am
 include lib/cli/Makemodule.am
 
 include src/Makemodule.am
+include tokens/Makemodule.am
 
 ACLOCAL_AMFLAGS = -I m4
 
