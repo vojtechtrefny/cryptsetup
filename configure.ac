@@ -365,6 +365,10 @@ AC_ARG_ENABLE([ssh-token],
 	AS_HELP_STRING([--enable-ssh-token], [enable build of ssh-token]))
 AM_CONDITIONAL(SSHPLUGIN_TOKEN, test "x$enable_ssh_token" = "xyes")
 
+AC_ARG_ENABLE([tpm2-token],
+	AS_HELP_STRING([--enable-tpm2-token], [enable build of TPM2 token]))
+AM_CONDITIONAL(TPM2_TOKEN, test "x$enable_tpm2_token" = "xyes")
+
 dnl Try to use pkg-config for devmapper, but fallback to old detection
 PKG_CHECK_MODULES([DEVMAPPER], [devmapper >= 1.02.03],, [
 	AC_CHECK_LIB(devmapper, dm_task_set_name,,
@@ -401,6 +405,12 @@ AC_CHECK_DECLS([json_object_deep_copy], [], [], [#include <json-c/json.h>])
 dnl Check for libssh for SSH plugin
 if test "x$enable_ssh_token" = "xyes"; then
 	PKG_CHECK_MODULES([LIBSSH], [libssh])
+fi
+
+if test "x$enable_tpm2_token" = "xyes"; then
+	PKG_CHECK_MODULES([TSS2_ESYS], [tss2-esys])
+	PKG_CHECK_MODULES([TSS2_RC], [tss2-rc])
+	PKG_CHECK_MODULES([TSS2_TCTILDR], [tss2-tctildr])
 fi
 
 dnl Crypto backend configuration.
@@ -558,6 +568,9 @@ AC_SUBST([CRYPTO_STATIC_LIBS])
 AC_SUBST([JSON_C_LIBS])
 AC_SUBST([LIBARGON2_LIBS])
 AC_SUBST([BLKID_LIBS])
+AC_SUBST([TSS2_ESYS_LIBS])
+AC_SUBST([TSS2_RC_LIBS])
+AC_SUBST([TSS2_TCTILDR_LIBS])
 
 AC_SUBST([LIBCRYPTSETUP_VERSION])
 AC_SUBST([LIBCRYPTSETUP_VERSION_INFO])
