@@ -1,0 +1,148 @@
+#!/bin/bash
+
+[ -z "$CRYPTSETUP_PATH" ] && CRYPTSETUP_PATH=".."
+CRYPTSETUP=$CRYPTSETUP_PATH/cryptsetup
+MNT_DIR="./mnt_luks_tpm"
+DEV_NAME="dummy"
+PWD="93R4P4pIqAH8"
+TPM_PWD="mymJeD8ivEhE"
+FAST_PBKDF_OPT="--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+TPM_PCR=8
+TPM_STATE_DIR="./tpm_state"
+TCTI_ARG=""
+
+cleanup() {
+	[ -b /dev/mapper/$DEV_NAME ] && dmsetup remove --retry $DEV_NAME
+	udevadm settle >/dev/null 2>&1
+	if [ -d "$MNT_DIR" ] ; then
+	    umount -f $MNT_DIR 2>/dev/null
+	    rmdir $MNT_DIR 2>/dev/null
+	fi
+
+	pkill swtpm
+	sleep 2
+
+	if [ -d "$TPM_STATE_DIR" ] ; then
+	    rm -rf $TPM_STATE_DIR 2>/dev/null
+	fi
+}
+
+fail()
+{
+	[ -n "$1" ] && echo "FAIL $1"
+	echo "FAILED backtrace:"
+	while caller $frame; do ((frame++)); done
+	cleanup
+	exit 100
+}
+
+
+format() # format
+{
+	dd if=/dev/zero of=$DEV bs=1M count=32 >/dev/null 2>&1
+
+	echo $CRYPTSETUP luksFormat --type luks2 $DEV -q  $FAST_PBKDF_OPT -c aes-cbc-essiv:sha256
+	echo $PWD | $CRYPTSETUP luksFormat --type luks2 $DEV -q  $FAST_PBKDF_OPT -c aes-cbc-essiv:sha256
+	[ $? -ne 0 ] && fail "Format failed."
+}
+
+skip()
+{
+        echo "TEST SKIPPED: $1"
+        cleanup
+        exit 77
+}
+
+function bin_check()
+{
+	which $1 >/dev/null 2>&1 || skip "WARNING: test require $1 binary, test skipped."
+}
+
+test_sealing()
+{
+	if [ "`tpm2_getcap pcrs | grep $1 | cut -d "[" -f2 | cut -d "]" -f1 | grep " $TPM_PCR,"`" = "" ]; then
+		echo "PCR $TPM_PCR doesn't support $1 hash algorithm"
+
+		echo -e "$PWD\n$TPM_PWD\n$TPM_PWD" | $CRYPTSETUP --plugin tpm2 --plugin-tpm2-pcr=$TPM_PCR --plugin-tpm2-bank=$1 token add $DEV
+		[ $? -eq 0 ] && fail "Successfully sealed to PCR $TPM_PCR using $1 hash algorithm even though it is not supported by TPM."
+
+		return 77
+	fi
+
+	echo "TPM supports $1"
+
+	echo -e "$PWD\n$TPM_PWD\n$TPM_PWD" | $CRYPTSETUP --plugin tpm2 $TCTI_ARG --plugin-tpm2-pcr=$TPM_PCR --plugin-tpm2-bank=$1 token add $DEV
+	[ $? -ne 0 ] && fail "Failed to add TPM2 token sealed to PCR."
+
+	echo $TPM_PWD | $CRYPTSETUP --token-only open $DEV $DEV_NAME
+	[ $? -ne 0 ] && fail "Failed open device by TPM2 token sealed to PCR."
+
+	if [ $1 = "sha1" ]; then
+		tpm2_pcrextend 8:sha1=`printf '0%.0s' {1..40}`
+	fi
+
+	if [ $1 = "sha256" ]; then
+		tpm2_pcrextend 8:sha256=`printf '0%.0s' {1..64}`
+	fi
+
+	if [ $1 = "sha512" ]; then
+		tpm2_pcrextend 8:sha512=`printf '0%.0s' {1..128}`
+	fi
+
+	echo $TPM_PWD | $CRYPTSETUP --token-only open $DEV $DEV_NAME
+	[ $? -eq 0 ] && fail "Opened device by TPM2 token sealed to PCR even though registers have been changed."
+
+	$CRYPTSETUP close $DEV_NAME || fail
+
+	echo -e "$PWD\n$TPM_PWD\n$TPM_PWD" | $CRYPTSETUP --plugin tpm2 --token-id=0 token remove $DEV
+	[ $? -ne 0 ] && fail "Failed to remove TPM2 token sealed to PCR."
+}
+
+[ $(id -u) != 0 ] && skip "WARNING: You must be root to run this test, test skipped."
+
+# Prevent running TPM operations by default
+[ -z "$RUN_TPM2_PLUGIN_TEST" ] && skip "WARNING: Variable RUN_TPM2_PLUGIN_TEST must be defined, test skipped."
+
+bin_check tpm2_getcap
+bin_check tpm2_pcrextend
+[[ $USE_REAL_TPM -ne 1 ]] && bin_check swtpm
+
+if [ ! -e /dev/vtpmx ]; then
+	modprobe tpm_vtpm_proxy || skip "Cannot load tpm_vtpm_proxy module."
+fi
+
+[ ! -d $MNT_DIR ] && mkdir $MNT_DIR
+[ ! -d $TPM_STATE_DIR ] && mkdir $TPM_STATE_DIR
+
+if [[ $USE_REAL_TPM -ne 1 ]]; then
+	swtpm chardev --tpm2 --vtpm-proxy --tpmstate dir=$TPM_STATE_DIR > $TPM_STATE_DIR/log&
+	sleep 1
+	TPM_DEVICE_NUMBER=$(cat $TPM_STATE_DIR/log | head -n 1 | grep -o -E '/dev/tpm[0-9]+' | grep -E -o '[0-9]+$')
+	TCTI_ARG=$(echo --plugin-tpm2-tcti="device:/dev/tpmrm$TPM_DEVICE_NUMBER")
+fi
+
+echo "[1] Using tmpfs for image"
+DEV="$MNT_DIR/test.img"
+mount -t tmpfs none $MNT_DIR || skip "Mounting tmpfs not available."
+format
+
+# basic test
+echo "Adding TPM2 token"
+echo -e "$PWD\n$TPM_PWD\n$TPM_PWD" | $CRYPTSETUP --plugin tpm2 token add $DEV $TCTI_ARG
+[ $? -ne 0 ] && fail "Failed to add TPM2 token."
+
+echo "Opening using TPM2 token"
+echo $TPM_PWD | $CRYPTSETUP --token-only open $DEV $DEV_NAME
+[ $? -ne 0 ] && fail "Failed open device by TPM2 token."
+
+$CRYPTSETUP close $DEV_NAME || fail
+
+echo "Removing TPM2 token"
+echo -e "$PWD\n$TPM_PWD\n$TPM_PWD" | $CRYPTSETUP --plugin tpm2 token remove $DEV --token-id=0
+[ $? -ne 0 ] && fail "Failed to remove TPM2 token."
+
+test_sealing sha1
+test_sealing sha256
+test_sealing sha512
+
+cleanup

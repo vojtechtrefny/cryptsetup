@@ -18,6 +18,7 @@ DUMP_CONFIG_LOG="short"
 export TS_OPT_parsable="yes"
 
 export RUN_SSH_PLUGIN_TEST=1
+export RUN_TPM2_PLUGIN_TEST=1
 
 function configure_travis
 {
@@ -43,6 +44,7 @@ function check_nonroot
 		--enable-external-tokens \
 		--enable-external-cli-tokens \
 		--enable-ssh-token \
+		--enable-tpm2-token \
 		"$cfg_opts" \
 		|| return
 
@@ -63,6 +65,7 @@ function check_root
 		--enable-external-tokens \
 		--enable-external-cli-tokens \
 		--enable-ssh-token \
+		--enable-tpm2-token \
 		"$cfg_opts" \
 		|| return
 
@@ -115,6 +118,9 @@ function travis_install_script
 		linux-modules-extra-$(uname -r) \
 		libssh-dev \
 		sshpass \
+		tpm2-tools \
+		libtss2-dev \
+		swtpm \
 		|| return
 
 	# For VeraCrypt test

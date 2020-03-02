@@ -37,7 +37,11 @@ if CLI_TOKENS
 if SSHPLUGIN_TOKEN
 TESTS += ssh-plugin-test
 endif
+if TPM2_TOKEN
+TESTS += tpm2-plugin-test
 endif
+endif
+
 
 EXTRA_DIST = compatimage.img.xz compatv10image.img.xz \
 	compatimage2.img.xz \
@@ -79,7 +83,8 @@ EXTRA_DIST = compatimage.img.xz compatv10image.img.xz \
 	Makefile.localtest \
 	bitlk-compat-test \
 	bitlk-images.tar.xz \
-	ssh-plugin-test
+	ssh-plugin-test \
+	tpm2-plugin-test
 
 CLEANFILES = cryptsetup-tst* valglog* *-fail-*.log
 clean-local:

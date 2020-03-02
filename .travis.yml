@@ -27,6 +27,8 @@ before_install:
   - export CC=`which $CC`
   # workaround travis-ci issue #5301
   - unset PYTHON_CFLAGS
+  # swtpm
+  - sudo add-apt-repository -y ppa:stefanberger/swtpm-focal
 
 install:
   - source ./.travis-functions.sh
