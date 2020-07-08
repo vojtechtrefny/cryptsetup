@@ -50,6 +50,7 @@
 #include "libcryptsetup.h"
 #include "libcryptsetup_cli.h"
 #include "lib/cli/cli_internal.h"
+#include "plugin.h"
 
 #define CONST_CAST(x) (x)(uintptr_t)
 #define DEFAULT_CIPHER(type)	(DEFAULT_##type##_CIPHER "-" DEFAULT_##type##_MODE)
@@ -139,5 +140,54 @@ struct tools_log_params {
 	bool verbose;
 	bool debug;
 };
+
+/* external token plugins */
+
+struct tools_token_handler {
+	crypt_token_handle_init_func init;
+	crypt_token_handle_free_func free;
+	crypt_token_version_func version;
+
+	crypt_token_create_params_func create_params;
+	crypt_token_validate_create_params_func validate_create_params;
+	crypt_token_create_func create;
+
+	crypt_token_remove_params_func remove_params;
+	crypt_token_validate_remove_params_func validate_remove_params;
+	crypt_token_remove_func remove;
+
+	size_t total_args_count;
+
+	const char *type;
+	char *create_desc;
+	char *remove_desc;
+
+	bool loaded;
+	void *dlhandle;
+	struct poptOption popt_table_plugin[3];
+	struct poptOption popt_create_args[3];
+	struct poptOption popt_remove_args[3];
+	struct poptOption *popt_create_ref_args;
+	struct poptOption *popt_create_plg_args;
+	struct poptOption *popt_remove_ref_args;
+	struct poptOption *popt_remove_plg_args;
+	struct tools_arg *args_plugin;
+};
+
+int tools_plugin_load(const char *type,
+		struct poptOption *plugin_options,
+		struct tools_token_handler *token_handler,
+		struct tools_arg *core_args,
+		size_t core_args_len,
+		struct poptOption *popt_core_options,
+		void *plugin_cb,
+		bool quiet);
+
+void tools_plugin_unload(struct tools_token_handler *th);
+
+void tools_plugin_assign_args_to_action(struct tools_token_handler *thandle,
+		struct tools_arg *args,
+		size_t args_len,
+		const char *action);
 
 #endif /* CRYPTSETUP_H */

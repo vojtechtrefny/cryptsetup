@@ -127,6 +127,17 @@ if test "x$enable_external_tokens" = "xyes"; then
 fi
 
 dnl ==========================================================================
+dnl enable support cli token plugins (currently affects only cryptsetup)
+
+AC_ARG_ENABLE([external-cli-tokens],
+	AS_HELP_STRING([--enable-external-cli-tokens], [enable external LUKS2 tokens plugins in cryptsetup]))
+if test "x$enable_external_cli_tokens" = "xyes"; then
+	AC_DEFINE(USE_EXTERNAL_CLI_TOKENS, 1, [Use cli external tokens])
+	TOKENSCLI_LIBS="-ldl"
+fi
+AM_CONDITIONAL(CLI_TOKENS, test "x$enable_external_cli_tokens" = "xyes")
+
+dnl ==========================================================================
 
 AM_GNU_GETTEXT([external],[need-ngettext])
 AM_GNU_GETTEXT_VERSION([0.18.3])
@@ -541,6 +552,8 @@ AC_SUBST([BLKID_LIBS])
 
 AC_SUBST([LIBCRYPTSETUP_VERSION])
 AC_SUBST([LIBCRYPTSETUP_VERSION_INFO])
+
+AC_SUBST([TOKENSCLI_LIBS])
 
 AC_SUBST([LIBCRYPTSETUP_CLI_VERSION])
 AC_SUBST([LIBCRYPTSETUP_CLI_VERSION_INFO])

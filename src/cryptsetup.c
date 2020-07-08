@@ -26,6 +26,9 @@
 #include "cryptsetup.h"
 #include "cryptsetup_args.h"
 
+static bool processing_help = false;
+static bool popt_first_run = true;
+
 static char *keyfiles[MAX_KEYFILES];
 static char *keyfile_stdin = NULL;
 
@@ -39,6 +42,13 @@ static const char **action_argv;
 static int action_argc;
 static const char *null_action_argv[] = {NULL, NULL};
 static int total_keyfiles = 0;
+
+static struct crypt_cli tool_ctx = {
+	.core_args = tool_core_args,
+	.core_args_count = ARRAY_SIZE(tool_core_args)
+};
+
+static struct tools_token_handler token_handler;
 
 static struct tools_log_params log_parms;
 
@@ -2527,59 +2537,6 @@ out:
 	return r;
 }
 
-static int _token_add(struct crypt_device *cd)
-{
-	int r, token;
-	crypt_token_info token_info;
-	const struct crypt_token_params_luks2_keyring params = {
-		.key_description = ARG_STR(OPT_KEY_DESCRIPTION_ID)
-	};
-
-	if (ARG_INT32(OPT_TOKEN_ID_ID) != CRYPT_ANY_TOKEN) {
-		token_info = crypt_token_status(cd, ARG_INT32(OPT_TOKEN_ID_ID), NULL);
-		if (token_info < CRYPT_TOKEN_INACTIVE) {
-			log_err(_("Token %d is invalid."), ARG_INT32(OPT_TOKEN_ID_ID));
-			return -EINVAL;
-		} else if (token_info > CRYPT_TOKEN_INACTIVE) {
-			log_err(_("Token %d in use."), ARG_INT32(OPT_TOKEN_ID_ID));
-			return -EINVAL;
-		}
-	}
-
-	r = crypt_token_luks2_keyring_set(cd, ARG_INT32(OPT_TOKEN_ID_ID), &params);
-	if (r < 0) {
-		log_err(_("Failed to add luks2-keyring token %d."), ARG_INT32(OPT_TOKEN_ID_ID));
-		return r;
-	}
-
-	token = r;
-
-	r = crypt_token_assign_keyslot(cd, token, ARG_INT32(OPT_KEY_SLOT_ID));
-	if (r < 0) {
-		log_err(_("Failed to assign token %d to keyslot %d."), token, ARG_INT32(OPT_KEY_SLOT_ID));
-		(void) crypt_token_json_set(cd, token, NULL);
-		return r;
-	}
-
-	return token;
-}
-
-static int _token_remove(struct crypt_device *cd)
-{
-	crypt_token_info token_info;
-
-	token_info = crypt_token_status(cd, ARG_INT32(OPT_TOKEN_ID_ID), NULL);
-	if (token_info < CRYPT_TOKEN_INACTIVE) {
-		log_err(_("Token %d is invalid."), ARG_INT32(OPT_TOKEN_ID_ID));
-		return -EINVAL;
-	} else if (token_info == CRYPT_TOKEN_INACTIVE) {
-		log_err(_("Token %d is not in use."), ARG_INT32(OPT_TOKEN_ID_ID));
-		return -EINVAL;
-	}
-
-	return crypt_token_json_set(cd, ARG_INT32(OPT_TOKEN_ID_ID), NULL);
-}
-
 static int _token_import(struct crypt_device *cd)
 {
 	char *json;
@@ -2637,6 +2594,174 @@ static int _token_export(struct crypt_device *cd)
 	return tools_write_json_file(cd, ARG_STR(OPT_JSON_FILE_ID), json);
 }
 
+static int token_plugin_validate_add_args(struct tools_token_handler *token_handler, void *handle, struct crypt_device *cd)
+{
+	if (!token_handler->create) {
+		log_err(_("Plugin %s does not support token add action."), token_handler->type);
+		return -ENOTSUP;
+	}
+
+	if (!token_handler->validate_create_params) {
+		log_dbg("Plugin does not export validation method for token add action.");
+		return 0;
+	}
+
+	return token_handler->validate_create_params(cd, handle);
+}
+
+static int token_plugin_validate_remove_args(struct tools_token_handler *token_handler, void *handle, struct crypt_device *cd)
+{
+	if (!token_handler->remove) {
+		log_err(_("Plugin %s does not support token remove action."), token_handler->type);
+		return -ENOTSUP;
+	}
+
+	if (!token_handler->validate_remove_params) {
+		log_dbg("Plugin does not export validation method for token remove action.");
+		return 0;
+	}
+
+	return token_handler->validate_remove_params(cd, handle);
+}
+
+static int token_plugin_add(struct crypt_device *cd, struct tools_token_handler *token_handler)
+{
+	int r;
+	void *phandle = NULL;
+
+	if (!token_handler || !token_handler->init || !token_handler->free)
+		return -EINVAL;
+
+	r = token_handler->init(&tool_ctx, &phandle);
+	if (r) {
+		log_verbose(_("Failed to initialize plugin (%s) handle."), token_handler->type);
+		goto err;
+	}
+
+	r = token_plugin_validate_add_args(token_handler, phandle, cd);
+	if (r)
+		goto err;
+
+	r = token_handler->create(cd, phandle);
+	if (r < 0)
+		log_verbose(_("Plugin (%s) token add action failed."), token_handler->type);
+err:
+	token_handler->free(phandle);
+
+	return r;
+}
+
+static int token_plugin_remove(struct crypt_device *cd, struct tools_token_handler *token_handler)
+{
+	int r;
+	void *phandle = NULL;
+
+	if (!token_handler || !token_handler->init || !token_handler->free)
+		return -EINVAL;
+
+	r = token_handler->init(&tool_ctx, &phandle);
+	if (r) {
+		log_verbose(_("Failed to initialize plugin (%s) handle."), token_handler->type);
+		goto err;
+	}
+
+	r = token_plugin_validate_remove_args(token_handler, phandle, cd);
+	if (r)
+		goto err;
+
+	r = token_handler->remove(cd, phandle);
+	if (r < 0)
+		log_verbose(_("Plugin (%s) token remove action failed."), token_handler->type);
+err:
+	token_handler->free(phandle);
+
+	return r;
+}
+
+static int token_plugin_validate_args(const char *token_action, struct tools_token_handler *token_handler)
+{
+	int r;
+	void *phandle;
+
+	if (!token_handler || !token_handler->init || !token_handler->free)
+		return -EINVAL;
+
+	if (token_handler->init(&tool_ctx, &phandle)) {
+		log_err(_("Failed to initialize plugin (%s) handle."), token_handler->type);
+		return -EINVAL;
+	}
+
+	if (!strcmp(token_action, "add"))
+		r = token_plugin_validate_add_args(token_handler, phandle, NULL);
+	else if (!strcmp(token_action, "remove"))
+		r = token_plugin_validate_remove_args(token_handler, phandle, NULL);
+	else
+		r = -ENOTSUP;
+
+	token_handler->free(phandle);
+
+	return r;
+}
+
+static int _token_add(struct crypt_device *cd)
+{
+	int r, token;
+	crypt_token_info token_info;
+	const struct crypt_token_params_luks2_keyring params = {
+		.key_description = ARG_STR(OPT_KEY_DESCRIPTION_ID)
+	};
+
+	if (token_handler.type)
+		return token_plugin_add(cd, &token_handler);
+
+	if (ARG_INT32(OPT_TOKEN_ID_ID) != CRYPT_ANY_TOKEN) {
+		token_info = crypt_token_status(cd, ARG_INT32(OPT_TOKEN_ID_ID), NULL);
+		if (token_info < CRYPT_TOKEN_INACTIVE) {
+			log_err(_("Token %d is invalid."), ARG_INT32(OPT_TOKEN_ID_ID));
+			return -EINVAL;
+		} else if (token_info > CRYPT_TOKEN_INACTIVE) {
+			log_err(_("Token %d in use."), ARG_INT32(OPT_TOKEN_ID_ID));
+			return -EINVAL;
+		}
+	}
+
+	r = crypt_token_luks2_keyring_set(cd, ARG_INT32(OPT_TOKEN_ID_ID), &params);
+	if (r < 0) {
+		log_err(_("Failed to add luks2-keyring token %d."), ARG_INT32(OPT_TOKEN_ID_ID));
+		return r;
+	}
+
+	token = r;
+
+	r = crypt_token_assign_keyslot(cd, token, ARG_INT32(OPT_KEY_SLOT_ID));
+	if (r < 0) {
+		log_err(_("Failed to assign token %d to keyslot %d."), token, ARG_INT32(OPT_KEY_SLOT_ID));
+		(void) crypt_token_json_set(cd, token, NULL);
+		return r;
+	}
+
+	return token;
+}
+
+static int _token_remove(struct crypt_device *cd)
+{
+	crypt_token_info token_info;
+
+	if (token_handler.type)
+		return token_plugin_remove(cd, &token_handler);
+
+	token_info = crypt_token_status(cd, ARG_INT32(OPT_TOKEN_ID_ID), NULL);
+	if (token_info < CRYPT_TOKEN_INACTIVE) {
+		log_err(_("Token %d is invalid."), ARG_INT32(OPT_TOKEN_ID_ID));
+		return -EINVAL;
+	} else if (token_info == CRYPT_TOKEN_INACTIVE) {
+		log_err(_("Token %d is not in use."), ARG_INT32(OPT_TOKEN_ID_ID));
+		return -EINVAL;
+	}
+
+	return crypt_token_json_set(cd, ARG_INT32(OPT_TOKEN_ID_ID), NULL);
+}
+
 static int action_token(void)
 {
 	int r;
@@ -2655,7 +2780,7 @@ static int action_token(void)
 	r = -EINVAL;
 
 	if (!strcmp(action_argv[0], "add")) {
-		r = _token_add(cd); /* adds only luks2-keyring type */
+		r = _token_add(cd);
 		tools_token_msg(r, CREATED);
 	} else if (!strcmp(action_argv[0], "remove")) {
 		r = _token_remove(cd);
@@ -2710,6 +2835,7 @@ static int _get_device_active_name(struct crypt_device *cd, const char *data_dev
 					     "To run reencryption in online mode, use --active-name parameter instead.\n"), data_device);
 			if (r < 0)
 				return -ENOMEM;
+
 			r = noDialog(msg, _("Operation aborted.\n")) ? 0 : -EINVAL;
 			free(msg);
 		}
@@ -3422,15 +3548,87 @@ static struct action_type {
 	{}
 };
 
+static struct tools_arg *find_arg_in_args(const char *name, struct tools_arg *args, size_t args_len)
+{
+	size_t i;
+
+	if (!args)
+		return NULL;
+
+	for (i = 0; i < args_len; i++) {
+		if (args[i].name && !strcmp(name, args[i].name))
+			return args + i;
+	}
+
+	return NULL;
+}
+
+static void plugin_cb(poptContext popt_context,
+		 enum poptCallbackReason reason,
+		 struct poptOption *key,
+		 const char *arg,
+		 void *data);
+
+static void basic_options_cb(poptContext popt_context,
+		 enum poptCallbackReason reason,
+		 struct poptOption *key,
+		 const char *arg,
+		 void *data);
+
+static void help(poptContext popt_context,
+		 enum poptCallbackReason reason,
+		 struct poptOption *key,
+		 const char *arg,
+		 void *data);
+
+static struct poptOption popt_basic_options[] = {
+	{ NULL,    '\0', POPT_ARG_CALLBACK, basic_options_cb, 0, NULL, NULL },
+#define ARG(A, B, C, D, E, F, G, H) { A, B, C, NULL, A ## _ID, D, E },
+#include "cryptsetup_arg_list.h"
+#undef arg
+	POPT_TABLEEND
+};
+static struct poptOption popt_help_options[] = {
+	{ NULL,    '\0', POPT_ARG_CALLBACK, help, 0, NULL,                         NULL },
+	{ "help",  '?',  POPT_ARG_NONE,     NULL, 0, N_("Show this help message"), NULL },
+	{ "usage", '\0', POPT_ARG_NONE,     NULL, 0, N_("Display brief usage"),    NULL },
+	{ "version",'V', POPT_ARG_NONE,     NULL, 0, N_("Print package version"),  NULL },
+	POPT_TABLEEND
+};
+static struct poptOption popt_options[] = {
+	{ NULL, '\0', POPT_ARG_INCLUDE_TABLE, popt_help_options,  0, N_("Help options:"), NULL },
+	{ NULL, '\0', POPT_ARG_INCLUDE_TABLE, popt_basic_options, 0, NULL, NULL },
+	POPT_TABLEEND, /* placeholder for plugin popt options */
+	POPT_TABLEEND
+};
+
 static void help(poptContext popt_context,
 		 enum poptCallbackReason reason __attribute__((unused)),
 		 struct poptOption *key,
 		 const char *arg __attribute__((unused)),
 		 void *data __attribute__((unused)))
 {
+	if (processing_help)
+		return;
+
 	if (key->shortName == '?') {
 		struct action_type *action;
 		const struct crypt_pbkdf_type *pbkdf_luks1, *pbkdf_luks2;
+
+		/* load plugin for plugin specific args help */
+		processing_help = true;
+
+		while (poptGetNextOpt(popt_context) != -1);
+
+		if (token_handler.type)
+			(void)tools_plugin_load(token_handler.type,
+					&popt_options[2],
+					&token_handler,
+					tool_core_args,
+					ARRAY_SIZE(tool_core_args),
+					popt_basic_options,
+					plugin_cb,
+					true);
 
 		log_std("%s\n",PACKAGE_STRING);
 
@@ -3544,18 +3742,34 @@ static void basic_options_cb(poptContext popt_context,
 		 const char *arg,
 		 void *data __attribute__((unused)))
 {
+	if (popt_first_run) {
+		switch (key->val) {
+		case OPT_DEBUG_JSON_ID:
+			ARG_SET_TRUE(OPT_DEBUG_JSON_ID);
+			/* fall through */
+		case OPT_DEBUG_ID:
+			ARG_SET_TRUE(OPT_DEBUG_ID);
+			log_parms.debug = true;
+			/* fall through */
+		case OPT_VERBOSE_ID:
+			ARG_SET_TRUE(OPT_VERBOSE_ID);
+			log_parms.verbose = true;
+			break;
+#ifdef USE_EXTERNAL_CLI_TOKENS
+		case OPT_PLUGIN_ID:
+			if (!ARG_SET(OPT_PLUGIN_ID) && !token_handler.type) {
+				ARG_SET_STR(OPT_PLUGIN_ID, poptGetOptArg(popt_context));
+				token_handler.type = strdup(ARG_STR(OPT_PLUGIN_ID));
+			}
+#endif
+		}
+		return;
+	}
+
 	tools_parse_arg_value(popt_context, tool_core_args[key->val].type, tool_core_args + key->val, arg, key->val, needs_size_conversion);
 
 	/* special cases additional handling */
 	switch (key->val) {
-	case OPT_DEBUG_JSON_ID:
-		/* fall through */
-	case OPT_DEBUG_ID:
-		log_parms.debug = true;
-		/* fall through */
-	case OPT_VERBOSE_ID:
-		log_parms.verbose = true;
-		break;
 	case OPT_DEVICE_SIZE_ID:
 		if (ARG_UINT64(OPT_DEVICE_SIZE_ID) == 0)
 			usage(popt_context, EXIT_FAILURE, poptStrerror(POPT_ERROR_BADNUMBER),
@@ -3604,6 +3818,18 @@ static void basic_options_cb(poptContext popt_context,
 			      poptGetInvocationName(popt_context));
 		data_shift = -(int64_t)ARG_UINT64(OPT_REDUCE_DEVICE_SIZE_ID);
 		break;
+	case OPT_PLUGIN_ID:
+#ifdef USE_EXTERNAL_CLI_TOKENS
+		/* technically we can load multiple tokens but there no use case yet. */
+		assert(token_handler.type && token_handler.loaded);
+		if (token_handler.type && strcmp(token_handler.type, ARG_STR(OPT_PLUGIN_ID)))
+			usage(popt_context, EXIT_FAILURE, _("Loading multiple plugins at once is not supported."),
+			      poptGetInvocationName(popt_context));
+#else
+		usage(popt_context, EXIT_FAILURE, _("Command line interface plugins support is disabled."),
+		      poptGetInvocationName(popt_context));
+#endif
+		break;
 	case OPT_SECTOR_SIZE_ID:
 		if (ARG_UINT32(OPT_SECTOR_SIZE_ID) < SECTOR_SIZE ||
 		    ARG_UINT32(OPT_SECTOR_SIZE_ID) > MAX_SECTOR_SIZE ||
@@ -3623,31 +3849,32 @@ static void basic_options_cb(poptContext popt_context,
 	}
 }
 
+static void plugin_cb(poptContext popt_context,
+		 enum poptCallbackReason reason __attribute__((unused)),
+		 struct poptOption *key,
+		 const char *arg,
+		 void *data)
+{
+	struct tools_arg *targ;
+	struct tools_token_handler *th = (struct tools_token_handler *)data;
+
+	if (processing_help)
+		return;
+
+	assert(!strncmp(key->longName, "plugin-", 7));
+
+	targ = find_arg_in_args(key->longName + strlen(th->type) + 8, th->args_plugin, th->total_args_count);
+	if (targ)
+		tools_parse_arg_value(popt_context, targ->type, targ, arg, 0, NULL);
+}
+
 int main(int argc, const char **argv)
 {
-	static struct poptOption popt_help_options[] = {
-		{ NULL,    '\0', POPT_ARG_CALLBACK, help, 0, NULL,                         NULL },
-		{ "help",  '?',  POPT_ARG_NONE,     NULL, 0, N_("Show this help message"), NULL },
-		{ "usage", '\0', POPT_ARG_NONE,     NULL, 0, N_("Display brief usage"),    NULL },
-		{ "version",'V', POPT_ARG_NONE,     NULL, 0, N_("Print package version"),  NULL },
-		POPT_TABLEEND
-	};
-	static struct poptOption popt_basic_options[] = {
-		{ NULL,    '\0', POPT_ARG_CALLBACK, basic_options_cb, 0, NULL, NULL },
-#define ARG(A, B, C, D, E, F, G, H) { A, B, C, NULL, A ## _ID, D, E },
-#include "cryptsetup_arg_list.h"
-#undef arg
-		POPT_TABLEEND
-	};
-	static struct poptOption popt_options[] = {
-		{ NULL, '\0', POPT_ARG_INCLUDE_TABLE, popt_help_options,  0, N_("Help options:"), NULL },
-		{ NULL, '\0', POPT_ARG_INCLUDE_TABLE, popt_basic_options, 0, NULL, NULL },
-		POPT_TABLEEND
-	};
 	poptContext popt_context;
 	struct action_type *action;
 	const char *aname;
 	int r;
+	bool plugin;
 
 	crypt_set_log_callback(NULL, tool_log, &log_parms);
 
@@ -3659,7 +3886,45 @@ int main(int argc, const char **argv)
 	poptSetOtherOptionHelp(popt_context,
 	                       _("[OPTION...] <action> <action-specific>"));
 
-	while ((r = poptGetNextOpt(popt_context)) > 0) {}
+	/* ignore errors for now, we're setting debug levels and looking for plugins */
+	while (poptGetNextOpt(popt_context) != -1);
+
+	popt_first_run = false;
+
+	if (ARG_SET(OPT_DEBUG_ID) || ARG_SET(OPT_DEBUG_JSON_ID))
+		crypt_set_debug_level(ARG_SET(OPT_DEBUG_JSON_ID)? CRYPT_DEBUG_JSON : CRYPT_DEBUG_ALL);
+
+	plugin = ARG_SET(OPT_PLUGIN_ID);
+	aname = poptGetArg(popt_context);
+
+	tools_cleanup();
+	poptResetContext(popt_context);
+
+	if (plugin && aname && !strcmp(aname, "token") && token_handler.type) {
+		if (tools_plugin_load(token_handler.type,
+				      &popt_options[2],
+				      &token_handler,
+				      tool_core_args,
+				      ARRAY_SIZE(tool_core_args),
+				      popt_basic_options,
+				      plugin_cb, false))
+			usage(popt_context, EXIT_FAILURE,
+			      _("Failed to load token plugin."),
+			      poptGetInvocationName(popt_context));
+
+		tools_plugin_assign_args_to_action(&token_handler, tool_core_args,
+						   ARRAY_SIZE(tool_core_args), TOKEN_ACTION);
+
+		tool_ctx.plugin_args.name = token_handler.type;
+		tool_ctx.plugin_args.args = token_handler.args_plugin;
+		tool_ctx.plugin_args.count = token_handler.total_args_count;
+	}
+
+	while ((r = poptGetNextOpt(popt_context)) > 0);
+
+	if (r < -1)
+		usage(popt_context, EXIT_FAILURE, poptStrerror(r),
+		      poptBadOption(popt_context, POPT_BADOPTION_NOALIAS));
 
 	if (r < -1)
 		usage(popt_context, EXIT_FAILURE, poptStrerror(r),
@@ -3891,10 +4156,8 @@ int main(int argc, const char **argv)
 		      _("Keyslot specification is required."),
 		      poptGetInvocationName(popt_context));
 
-	if (ARG_SET(OPT_DEBUG_ID) || ARG_SET(OPT_DEBUG_JSON_ID)) {
-		crypt_set_debug_level(ARG_SET(OPT_DEBUG_JSON_ID)? CRYPT_DEBUG_JSON : CRYPT_DEBUG_ALL);
+	if (ARG_SET(OPT_DEBUG_ID) || ARG_SET(OPT_DEBUG_JSON_ID))
 		dbg_version_and_cmd(argc, argv);
-	}
 
 	/* reencrypt action specific check */
 	if (ARG_SET(OPT_DECRYPT_ID) && !ARG_SET(OPT_HEADER_ID))
@@ -3913,13 +4176,6 @@ int main(int argc, const char **argv)
 		usage(popt_context, EXIT_FAILURE, _("Options --keyslot-cipher and --keyslot-key-size must be used together."),
 		      poptGetInvocationName(popt_context));
 
-	if (ARG_SET(OPT_TEST_ARGS_ID)) {
-		log_std(_("No action taken. Invoked with --test-args option.\n"));
-		tools_cleanup();
-		poptFreeContext(popt_context);
-		return 0;
-	}
-
 	/* token action specific check */
 	if (!strcmp(aname, TOKEN_ACTION)) {
 		if (strcmp(action_argv[0], "add") &&
@@ -3929,14 +4185,29 @@ int main(int argc, const char **argv)
 			usage(popt_context, EXIT_FAILURE, _("Unknown token action."),
 			      poptGetInvocationName(popt_context));
 
-		if (!ARG_SET(OPT_KEY_DESCRIPTION_ID) && !strcmp(action_argv[0], "add"))
+		if (!ARG_SET(OPT_PLUGIN_ID) && !ARG_SET(OPT_KEY_DESCRIPTION_ID) && !strcmp(action_argv[0], "add"))
 			usage(popt_context, EXIT_FAILURE, _("Option --key-description is required."),
 			      poptGetInvocationName(popt_context));
 
-		if (ARG_INT32(OPT_TOKEN_ID_ID) == CRYPT_ANY_TOKEN &&
-		    (!strcmp(action_argv[0], "remove") || !strcmp(action_argv[0], "export")))
+		if (!ARG_SET(OPT_PLUGIN_ID) && ARG_INT32(OPT_TOKEN_ID_ID) == CRYPT_ANY_TOKEN && !strcmp(action_argv[0], "remove"))
 			usage(popt_context, EXIT_FAILURE, _("Option --token-id is required."),
 			      poptGetInvocationName(popt_context));
+
+		if (ARG_INT32(OPT_TOKEN_ID_ID) == CRYPT_ANY_TOKEN && !strcmp(action_argv[0], "export"))
+			usage(popt_context, EXIT_FAILURE, _("Option --token-id is required."),
+			      poptGetInvocationName(popt_context));
+
+		/* token action specific check (plugin) */
+		if (ARG_SET(OPT_PLUGIN_ID) && token_plugin_validate_args(action_argv[0], &token_handler))
+			usage(popt_context, EXIT_FAILURE, _("Invalid plugin token arguments."),
+			      poptGetInvocationName(popt_context));
+	}
+
+	if (ARG_SET(OPT_TEST_ARGS_ID)) {
+		log_std(_("No action taken. Invoked with --test-args option.\n"));
+		tools_cleanup();
+		poptFreeContext(popt_context);
+		return 0;
 	}
 
 	if (ARG_SET(OPT_DISABLE_KEYRING_ID))
@@ -3952,4 +4223,9 @@ int main(int argc, const char **argv)
 	tools_cleanup();
 	poptFreeContext(popt_context);
 	return r;
+}
+
+static void __attribute__((destructor)) cryptsetup_exit(void)
+{
+	tools_plugin_unload(&token_handler);
 }

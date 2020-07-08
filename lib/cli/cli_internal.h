@@ -42,9 +42,16 @@ struct tools_arg {
 	const char *actions_array[MAX_ACTIONS];
 };
 
+struct plugin_args {
+	const char *name;
+	const struct tools_arg *args;
+	size_t count;
+};
+
 struct crypt_cli {
 	const struct tools_arg *core_args;
 	size_t core_args_count;
+	struct plugin_args plugin_args;
 };
 
 #endif

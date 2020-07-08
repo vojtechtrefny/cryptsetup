@@ -2,3 +2,16 @@ CRYPTSETUP_TOKEN_1.0 {
     global: cryptsetup_token_handler;
     local: *;
 };
+
+CRYPTSETUP_CLI_TOKEN_1.0 {
+    global: crypt_token_handle_init;
+	    crypt_token_handle_free;
+	    crypt_token_version;
+	    crypt_token_create;
+	    crypt_token_create_params;
+	    crypt_token_validate_create_params;
+	    crypt_token_remove;
+	    crypt_token_remove_params;
+	    crypt_token_validate_remove_params;
+    local: *;
+};

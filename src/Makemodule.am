@@ -1,9 +1,6 @@
 # cryptsetup
 if CRYPTSETUP
 
-# cryptsetup_CPPFLAGS = $(AM_CPPFLAGS) \
-# 	-I $(top_srcdir)/lib/cli
-
 cryptsetup_SOURCES =		\
 	lib/utils_crypt.c	\
 	lib/utils_loop.c	\
@@ -16,17 +13,20 @@ cryptsetup_SOURCES =		\
 	src/utils_blockdev.c	\
 	src/utils_arg_names.h	\
 	src/utils_arg_macros.h	\
+	src/utils_plugins.c	\
 	src/cryptsetup.c	\
 	src/cryptsetup.h	\
 	src/cryptsetup_args.h	\
-	src/cryptsetup_arg_list.h
+	src/cryptsetup_arg_list.h \
+	src/plugin.h
 
 cryptsetup_LDADD = $(LDADD)	\
 	libcryptsetup.la	\
 	libcryptsetup_cli.la	\
 	@POPT_LIBS@		\
 	@UUID_LIBS@		\
-	@BLKID_LIBS@
+	@BLKID_LIBS@		\
+	@TOKENSCLI_LIBS@
 
 sbin_PROGRAMS += cryptsetup
 
