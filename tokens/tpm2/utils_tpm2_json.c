@@ -147,6 +147,7 @@ out:
 int tpm2_token_read(struct crypt_device *cd,
 	const char *json,
 	uint32_t *tpm_nv,
+	uint32_t *tpmuuid_nv,
 	uint32_t *tpm_pcr,
 	uint32_t *pcrbanks,
 	bool *daprotect,
@@ -168,6 +169,11 @@ int tpm2_token_read(struct crypt_device *cd,
 		goto out;
 	if (tpm_nv)
 		*tpm_nv = (uint32_t)json_object_get_int64(jobj);
+
+	if (!json_object_object_get_ex(jobj_token, "uuid-nvindex", &jobj))
+		goto out;
+	if (tpmuuid_nv)
+		*tpmuuid_nv = (uint32_t)json_object_get_int64(jobj);
 
 	if (!json_object_object_get_ex(jobj_token, "nvkey-size", &jobj))
 		goto out;
@@ -221,6 +227,7 @@ out:
 int tpm2_token_add(struct crypt_device *cd,
 	int token,
 	uint32_t tpm_nv,
+	uint32_t tpm_uuid_nv,
 	uint32_t tpm_pcr,
 	uint32_t pcrbanks,
 	bool daprotect,
@@ -244,6 +251,11 @@ int tpm2_token_add(struct crypt_device *cd,
 	if (!jobj)
 		goto out;
 	json_object_object_add(jobj_token, "nvindex", jobj);
+
+	jobj = json_object_new_int64(tpm_uuid_nv);
+	if (!jobj)
+		goto out;
+	json_object_object_add(jobj_token, "uuid-nvindex", jobj);
 
 	jobj = json_object_new_int64(nvkey_size);
 	if (!jobj)
@@ -300,10 +312,24 @@ static uint32_t token_nvindex(struct crypt_device *cd, int token)
 	if (crypt_token_json_get(cd, token, &json) < 0)
 		return 0;
 
-	if (tpm2_token_read(cd, json, &nvindex, NULL, NULL, NULL, NULL, NULL))
+	if (tpm2_token_read(cd, json, &nvindex, NULL, NULL, NULL, NULL, NULL, NULL))
 		return 0;
 
 	return nvindex;
+}
+
+static uint32_t token_uuid_nvindex(struct crypt_device *cd, int token)
+{
+	const char *json;
+	uint32_t uuid_nvindex;
+
+	if (crypt_token_json_get(cd, token, &json) < 0)
+		return 0;
+
+	if (tpm2_token_read(cd, json, NULL, &uuid_nvindex, NULL, NULL, NULL, NULL, NULL))
+		return 0;
+
+	return uuid_nvindex;
 }
 
 int tpm2_token_by_nvindex(struct crypt_device *cd, uint32_t tpm_nv)
@@ -338,8 +364,12 @@ int tpm2_token_by_nvindex(struct crypt_device *cd, uint32_t tpm_nv)
 
 int tpm2_token_kill(struct crypt_device *cd, ESYS_CONTEXT *ctx, int token)
 {
-	uint32_t nvindex;
+	uint32_t nvindex, uuid_nvindex;
 	TSS2_RC r;
+
+	uuid_nvindex = token_uuid_nvindex(cd, token);
+	if (!uuid_nvindex)
+		return -EINVAL;
 
 	nvindex = token_nvindex(cd, token);
 	if (!nvindex)
@@ -347,9 +377,27 @@ int tpm2_token_kill(struct crypt_device *cd, ESYS_CONTEXT *ctx, int token)
 
 	bool exists;
 
+	r = tpm_nv_exists(cd, ctx, uuid_nvindex, &exists);
+	if (r != TSS2_RC_SUCCESS) {
+		l_err(cd, "Failed to check if UUID TPM NV-Index 0x%x exists.", uuid_nvindex);
+		LOG_TPM_ERR(cd, r);
+		return -EINVAL;
+	}
+
+	if (exists) {
+		r = tpm_nv_undefine(cd, ctx, uuid_nvindex);
+		if (r) {
+			l_err(cd, "Failed to undefine UUID TPM NV-Index 0x%x.", nvindex);
+			return -EINVAL;
+		}
+	} else {
+		l_err(cd, "UUID TPM NV-Index 0x%x is already deleted.", nvindex);
+	}
+
+
 	r = tpm_nv_exists(cd, ctx, nvindex, &exists);
 	if (r != TSS2_RC_SUCCESS) {
-		l_err(cd, "Failed to check if TPM2 NV-Index 0x%x exists.", nvindex);
+		l_err(cd, "Failed to check if TPM passphrase NV-Index 0x%x exists.", nvindex);
 		LOG_TPM_ERR(cd, r);
 		return -EINVAL;
 	}

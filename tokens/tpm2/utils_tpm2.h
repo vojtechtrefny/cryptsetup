@@ -120,6 +120,7 @@ int tpm_get_random(struct crypt_device *cd, ESYS_CONTEXT *ctx, char *random_byte
 int tpm2_token_add(struct crypt_device *cd,
 	int token,
 	uint32_t tpm_nv,
+	uint32_t tpm_uuid_nv,
 	uint32_t tpm_pcr,
 	uint32_t pcrbanks,
 	bool daprotect,
@@ -129,11 +130,23 @@ int tpm2_token_add(struct crypt_device *cd,
 int tpm2_token_read(struct crypt_device *cd,
 	const char *json,
 	uint32_t *tpm_nv,
+	uint32_t *tpmuuid_nv,
 	uint32_t *tpm_pcr,
 	uint32_t *pcrbanks,
 	bool *daprotect,
 	bool *pin,
 	size_t *nvkey_size);
+
+int tpm_nv_find_and_write(struct crypt_device *cd,
+	ESYS_CONTEXT *ctx,
+	uint32_t *tpmnv,
+	const char *buffer,
+	size_t buffer_size,
+	char *tpm_pin,
+	size_t tpm_pin_len,
+	uint32_t tpmbanks,
+	uint32_t tpmpcrs,
+	bool tpmdaprotect);
 
 int tpm2_token_by_nvindex(struct crypt_device *cd, uint32_t tpm_nv);
 

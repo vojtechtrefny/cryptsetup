@@ -71,18 +71,20 @@ const alg_info *get_alg_info_by_crypt_id(uint32_t crypt_id) {
 TSS2_RC tpm_init(struct crypt_device *cd, ESYS_CONTEXT **ctx, const char *tcti_conf)
 {
 	TSS2_RC r;
-	l_dbg(cd, "Initializing ESYS connection");
+	l_dbg(cd, "Initializing ESYS connection vith TCTI '%s'", tcti_conf);
 
 	TSS2_TCTI_CONTEXT *tcti_ctx = NULL;
 	r = Tss2_TctiLdr_Initialize (tcti_conf, &tcti_ctx);
 	if (r != TSS2_RC_SUCCESS) {
 		l_err(cd, "Error initializing TCTI");
+		LOG_TPM_ERR(cd, r);
 		return r;
 	}
 
 	r = Esys_Initialize(ctx, tcti_ctx, NULL);
 	if (r != TSS2_RC_SUCCESS) {
 		l_err(cd, "Error initializing ESYS");
+		LOG_TPM_ERR(cd, r);
 		return r;
 	}
 
@@ -94,6 +96,7 @@ TSS2_RC tpm_init(struct crypt_device *cd, ESYS_CONTEXT **ctx, const char *tcti_c
 
 	if (r != TSS2_RC_SUCCESS) {
 		l_err(cd, "TPM StartUp command failed");
+		LOG_TPM_ERR(cd, r);
 		Esys_Finalize(ctx);
 	}
 
@@ -200,8 +203,8 @@ static TSS2_RC tpm_policy_Read(struct crypt_device *cd,
 	};
 	unsigned int i;
 
-	if (pcrbanks == 0) {
-		l_err(cd, "No banks selected.");
+	if (tpm_pcr && !pcrbanks) {
+		l_err(cd, "You have to also select banks when you select PCRs.");
 		return TSS2_BASE_RC_BAD_SIZE;
 	}
 
@@ -267,6 +270,58 @@ static TSS2_RC tpm_policy_Read(struct crypt_device *cd,
 	free(policyDigest);
 
 	return TSS2_RC_SUCCESS;
+}
+
+int tpm_nv_find_and_write(struct crypt_device *cd,
+	ESYS_CONTEXT *ctx,
+	uint32_t *tpmnv,
+	const char *buffer,
+	size_t buffer_size,
+	char *tpm_pin,
+	size_t tpm_pin_len,
+	uint32_t tpmbanks,
+	uint32_t tpmpcrs,
+	bool tpmdaprotect)
+{
+	TSS2_RC tpm_rc;
+
+	if (!tpmnv) {
+		return -EINVAL;
+	}
+
+	if (!(*tpmnv)) {
+		tpm_rc = tpm_nv_find(cd, ctx, tpmnv);
+		if (tpm_rc != TSS2_RC_SUCCESS) {
+			l_err(cd, "Error while trying to find free NV index.");
+			LOG_TPM_ERR(cd, tpm_rc);
+			return -EACCES;
+		}
+	}
+
+	if (!(*tpmnv)) {
+		l_err(cd, "Error no free TPM NV-Index found.");
+		return -ENOMEM;
+	}
+
+	tpm_rc = tpm_nv_define(cd, ctx, *tpmnv, tpm_pin, tpm_pin_len, tpmpcrs,
+			  tpmbanks, tpmdaprotect, NULL, 0, buffer_size);
+	if (tpm_rc != TSS2_RC_SUCCESS) {
+		l_err(cd, "TPM NV-Index definition failed");
+		LOG_TPM_ERR(cd, tpm_rc);
+		return -EINVAL;
+	}
+
+	tpm_rc = tpm_nv_write(cd, ctx, *tpmnv, tpm_pin, tpm_pin_len,
+			buffer, buffer_size);
+	if (tpm_rc != TSS2_RC_SUCCESS) {
+		l_err(cd, "TPM NV-Index write error.");
+		LOG_TPM_ERR(cd, tpm_rc);
+		tpm_nv_undefine(cd, ctx, *tpmnv);
+		*tpmnv = 0;
+		return -EACCES;
+	}
+
+	return 0;
 }
 
 static TSS2_RC tpm_nv_prep(struct crypt_device *cd,
@@ -423,7 +478,7 @@ TSS2_RC tpm_nv_define(struct crypt_device *cd,
 	if (pin_size > sizeof(tpm_pin.buffer))
 		return TPM2_RC_FAILURE;
 
-	if (pin_size > 0)
+	if (pin && pin_size > 0)
 		memcpy(&tpm_pin.buffer[0], pin, tpm_pin.size);
 
 	if (!daprotect)
