@@ -42,6 +42,7 @@
 #define DAPROTECT_ARG	"plugin-tpm2-daprotect"
 #define NOPIN_ARG	"plugin-tpm2-no-pin"
 #define TCTI_ARG	"plugin-tpm2-tcti"
+#define FORCE_REMOVE_ARG	"plugin-tpm2-force-remove"
 
 #define CREATE_VALID	(1 << 0)
 #define CREATED		(1 << 1)
@@ -196,23 +197,84 @@ out:
 	return r;
 }
 
-static int tpm2_token_open_pin(struct crypt_device *cd,
+static bool tpm2_verify_tcti_for_token(struct crypt_device *cd,
 	int token,
-	const char *tpm_pass,
-	char **buffer,
-	size_t *buffer_len,
-	void *usrptr)
+	const char *tcti_spec)
+{
+	int r;
+	bool is_valid = true;
+	const char *json;
+	uint32_t nvindex, uuid_nvindex;
+	size_t uuid_len;
+	char *uuid_buffer = NULL;
+
+	TSS2_RC tpm_rc;
+	ESYS_CONTEXT *ctx;
+
+	if (tpm_init(cd, &ctx, tcti_spec) != TSS2_RC_SUCCESS)
+		return false;
+
+	r = crypt_token_json_get(cd, token, &json);
+	if (r < 0) {
+		l_err(cd, "Cannot read JSON token metadata.");
+		is_valid = false;
+		goto out;
+	}
+
+	r = tpm2_token_read(cd, json, &nvindex, &uuid_nvindex, NULL, NULL,
+			    NULL, NULL, NULL);
+	if (r < 0) {
+		l_err(cd, "Cannot read JSON token metadata.");
+		is_valid = false;
+		goto out;
+	}
+
+	uuid_len = strlen(crypt_get_uuid(cd));
+	uuid_buffer = calloc(1, uuid_len);
+	if (!uuid_buffer) {
+		is_valid = false;
+		goto out;
+	}
+
+	tpm_rc = tpm_nv_read(cd, ctx, uuid_nvindex, NULL, 0, 0, CRYPT_TPM_PCRBANK_SHA1, uuid_buffer, uuid_len);
+	if (tpm_rc != TPM2_RC_SUCCESS) {
+		l_dbg(cd, "Failed to read UUID NV index, this TPM doesn't seem to hold the passphrase.");
+		LOG_TPM_ERR(cd, tpm_rc);
+		is_valid = false;
+		goto out;
+	}
+
+	if (strncmp(crypt_get_uuid(cd), uuid_buffer, uuid_len)) {
+		l_dbg(cd, "Bad UUID NV index content, this TPM doesn't hold the passphrase.");
+		l_dbg(cd, "Real UUID: '%s'", crypt_get_uuid(cd));
+		l_dbg(cd, "TPM-stored UUID: '%s'", uuid_buffer);
+		is_valid = false;
+		goto out;
+	}
+out:
+	if (uuid_buffer) {
+		free(uuid_buffer);
+	}
+
+	Esys_Finalize(&ctx);
+	return is_valid;
+}
+
+static char *tpm2_find_tcti_for_token(struct crypt_device *cd,
+	int token)
 {
 	int access_error, i;
 
-	l_std(cd, "Trying to activate with TPM backend: 'tabrmd'\n");
-	int r = tpm2_token_open_pin_with_tcti(cd, token, tpm_pass, buffer, buffer_len,usrptr, "tabrmd");
-	if (r != -EINVAL) {
-		return r;
-	}
-
 	const size_t tcti_name_len = strlen("device:/dev/tpmrm") + TPMS_MAX_DIGITS + 1;
-	char tcti_conf[tcti_name_len];
+	char *tcti_conf = malloc(tcti_name_len);
+	if (!tcti_conf)
+		return NULL;
+
+	strcpy(tcti_conf, "tabrmd");
+	l_dbg(cd, "Verifying TCTI '%s' for token %d\n", tcti_conf, token);
+
+	if (tpm2_verify_tcti_for_token(cd, token, tcti_conf))
+		return tcti_conf;
 
 	for (i = 0; i < TPMS_NO_LIMIT; i++) {
 		snprintf(tcti_conf, tcti_name_len, "device:/dev/tpmrm%d", i);
@@ -222,31 +284,47 @@ static int tpm2_token_open_pin(struct crypt_device *cd,
 			l_dbg(cd, "Device does not exist", tcti_conf);
 			break;
 		}
-		l_dbg(cd, "Device exists, trying to activate...", tcti_conf);
-		l_std(cd, "Trying to activate with TPM backend: '%s'\n", tcti_conf);
-		int r = tpm2_token_open_pin_with_tcti(cd, token, tpm_pass, buffer, buffer_len,usrptr, tcti_conf);
-		if (r != -EINVAL) {
-			return r;
-		}
+		l_dbg(cd, "Device exists, verifying TCTI '%s' for token %d\n", tcti_conf, token);
+
+		if (tpm2_verify_tcti_for_token(cd, token, tcti_conf))
+			return tcti_conf;
 	}
 
 	for (i = 0; i < TPMS_NO_LIMIT; i++) {
-		snprintf(tcti_conf, tcti_name_len, "device:/dev/tpm%d", i);
+		snprintf(tcti_conf, tcti_name_len, "device:/dev/tpmrm%d", i);
 		l_dbg(cd, "Checking TPM device: '%s'\n", tcti_conf + 7);
 		access_error = access(tcti_conf + 7, R_OK | W_OK);
 		if (access_error) {
 			l_dbg(cd, "Device does not exist", tcti_conf);
 			break;
 		}
-		l_dbg(cd, "Device exists, trying to activate...", tcti_conf);
-		l_std(cd, "Trying to activate with TPM backend: '%s'\n", tcti_conf);
-		int r = tpm2_token_open_pin_with_tcti(cd, token, tpm_pass, buffer, buffer_len,usrptr, tcti_conf);
-		if (r != -EINVAL) {
-			return r;
-		}
+		l_dbg(cd, "Device exists, verifying TCTI '%s' for token %d\n", tcti_conf, token);
+
+		if (tpm2_verify_tcti_for_token(cd, token, tcti_conf))
+			return tcti_conf;
 	}
 
-	return -EINVAL;
+	free(tcti_conf);
+	return NULL;
+}
+
+static int tpm2_token_open_pin(struct crypt_device *cd,
+	int token,
+	const char *tpm_pass,
+	char **buffer,
+	size_t *buffer_len,
+	void *usrptr)
+{
+	char *tcti_conf;
+
+	tcti_conf = tpm2_find_tcti_for_token(cd, token);
+
+	if (!tcti_conf) {
+		l_err(cd, "Couldn't find a TPM device associated with the TPM token.");
+		return -EINVAL;
+	}
+
+	return tpm2_token_open_pin_with_tcti(cd, token, tpm_pass, buffer, buffer_len,usrptr, tcti_conf);
 }
 
 static int tpm2_token_open(struct crypt_device *cd,
@@ -275,6 +353,7 @@ struct tpm2_context {
 
 	bool tpmdaprotect;
 	bool no_tpm_pin;
+	bool force_remove;
 
 	int timeout;
 	int keyslot;
@@ -342,6 +421,7 @@ static const crypt_arg_list remove_args[] = {
 	/* plugin specific args */
 	{ NV_ARG,	"Select TPM's NV index",                   CRYPT_ARG_UINT32, &remove_args[1] },
 	{ TCTI_ARG,	"Select TCTI in format <tcti>:<tcti arg>, e.g. device:/dev/tpm0",               CRYPT_ARG_STRING, &remove_args[2] },
+	{ FORCE_REMOVE_ARG,	"Force remove the TPM token metadata from LUKS header, even if the TPM device is not present.", CRYPT_ARG_BOOL,  &remove_args[3] },
 	/* inherited from cryptsetup core args */
 	{ "token-id",	"Token number to remove",                                      CRYPT_ARG_INT32, NULL },
 };
@@ -589,6 +669,8 @@ static int get_remove_cli_args(struct crypt_device *cd, struct tpm2_context *tc)
 {
 	int r;
 
+	tc->force_remove = crypt_cli_arg_set(tc->cli, FORCE_REMOVE_ARG);
+
 	r = plugin_get_arg_value(cd, tc->cli, "token-id", CRYPT_ARG_INT32, &tc->token);
 	if (r)
 		return r;
@@ -598,6 +680,13 @@ static int get_remove_cli_args(struct crypt_device *cd, struct tpm2_context *tc)
 		if (r)
 			return r;
 	}
+
+	if (crypt_cli_arg_set(tc->cli, TCTI_ARG)) {
+		r = plugin_get_arg_value(cd, tc->cli, TCTI_ARG, CRYPT_ARG_STRING, &tc->tcti_str);
+		if (r)
+			return r;
+	}
+
 
 	return 0;
 }
@@ -633,6 +722,7 @@ int crypt_token_remove(struct crypt_device *cd, void *handle)
 {
 	int i, r;
 	const char *type;
+	char *found_tcti_conf = NULL;
 	struct tpm2_context *tc = (struct tpm2_context *)handle;
 
 	if (!tc)
@@ -657,19 +747,39 @@ int crypt_token_remove(struct crypt_device *cd, void *handle)
 		return -EINVAL;
 	}
 
+	if (tc->tcti_str && !tpm2_verify_tcti_for_token(cd, tc->token, tc->tcti_str) && !tc->force_remove) {
+		l_err(cd, "TPM device accessed via specified TCTI '%s' is not associated to this TPM token.", tc->tcti_str);
+		return -EINVAL;
+	}
+
+	if (!tc->tcti_str) {
+		l_dbg(cd, "No TCTI was specified, scanning...");
+		found_tcti_conf = tpm2_find_tcti_for_token(cd, tc->token);
+
+		if (!found_tcti_conf && !tc->force_remove) {
+			l_err(cd, "No TPM device associated to this TPM token was found.");
+			return -EINVAL;
+		}
+	}
+
 	/* Destroy all keyslots assigned to TPM 2 token */
 	for (i = 0; i < crypt_keyslot_max(CRYPT_LUKS2); i++) {
 		if (!crypt_token_is_assigned(cd, tc->token, i)) {
 			r = crypt_keyslot_destroy(cd, i);
 			if (r < 0) {
 				l_err(cd, "Cannot destroy keyslot %d.", i);
+				if (found_tcti_conf)
+					free(found_tcti_conf);
 				return r;
 			}
 		}
 	}
 
-	if (tpm_init(cd, &tc->ctx, tc->tcti_str) != TSS2_RC_SUCCESS)
+	if (tpm_init(cd, &tc->ctx, tc->tcti_str ? tc->tcti_str : found_tcti_conf) != TSS2_RC_SUCCESS) {
+		if (found_tcti_conf)
+			free(found_tcti_conf);
 		return -EINVAL;
+	}
 
 	/* Destroy TPM2 NV index and token object itself */
 	r = tpm2_token_kill(cd, tc->ctx, tc->token);
@@ -677,5 +787,8 @@ int crypt_token_remove(struct crypt_device *cd, void *handle)
 		tc->status |= REMOVED;
 
 	Esys_Finalize(&tc->ctx);
+
+	if (found_tcti_conf)
+		free(found_tcti_conf);
 	return r;
 }
