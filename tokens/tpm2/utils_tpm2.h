@@ -68,6 +68,7 @@ static const alg_info hash_algs[] = {
 
 #define CRYPT_HASH_ALGS_COUNT (sizeof(hash_algs)/sizeof(hash_algs[0]))
 
+char *bytes_to_hex(char *bytes, size_t size);
 const alg_info *get_alg_info_by_name(const char *name);
 const alg_info *get_alg_info_by_id(TPM2_ALG_ID id);
 const alg_info *get_alg_info_by_crypt_id(uint32_t crypt_id);
@@ -119,8 +120,11 @@ int tpm_get_random(struct crypt_device *cd, ESYS_CONTEXT *ctx, char *random_byte
 
 int tpm2_token_add(struct crypt_device *cd,
 	int token,
+	uint32_t version_major,
+	uint32_t version_minor,
 	uint32_t tpm_nv,
-	uint32_t tpm_uuid_nv,
+	uint32_t tpm_nonce_nvindex,
+	const char* tpm_nv_nonce,
 	uint32_t tpm_pcr,
 	uint32_t pcrbanks,
 	bool daprotect,
@@ -129,8 +133,11 @@ int tpm2_token_add(struct crypt_device *cd,
 
 int tpm2_token_read(struct crypt_device *cd,
 	const char *json,
+	uint32_t *version_major,
+	uint32_t *version_minor,
 	uint32_t *tpm_nv,
-	uint32_t *tpmuuid_nv,
+	uint32_t *tpm_nonce_nvindex,
+	char** tpm_nv_nonce,
 	uint32_t *tpm_pcr,
 	uint32_t *pcrbanks,
 	bool *daprotect,

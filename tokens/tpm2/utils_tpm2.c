@@ -31,6 +31,18 @@
 #include "utils_tpm2.h"
 #include "libcryptsetup.h"
 
+char *bytes_to_hex(char *bytes, size_t size) {
+	size_t i;
+	char *ret = malloc(size * 2 + 1);
+
+	for (i = 0; i < size; i++) {
+		snprintf(ret + i*2, 3, "%02x", (unsigned int) bytes[i]);
+	}
+
+	ret[size*2] = '\0';
+
+	return ret;
+}
 const alg_info *get_alg_info_by_name(const char *name) {
 	unsigned i;
 

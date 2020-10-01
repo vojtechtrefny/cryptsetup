@@ -32,9 +32,13 @@
 #include "../../src/plugin.h"
 
 #define TOKEN_NAME "tpm2"
+#define TOKEN_VERSION_MAJOR 1
+#define TOKEN_VERSION_MINOR 0
 #define DEFAULT_TPM2_SIZE 64
 #define DEFAULT_PCR_BANK "sha256"
-#define MAX_TPM_COUNT "sha256"
+#define TPMS_NO_LIMIT	100
+#define TPMS_MAX_DIGITS	2	// TPM no. 0-99
+#define NV_NONCE_SIZE	32
 
 #define NV_ARG		"plugin-tpm2-nv"
 #define PCR_ARG		"plugin-tpm2-pcr"
@@ -49,26 +53,34 @@
 #define REMOVE_VALID	(1 << 2)
 #define REMOVED		(1 << 3)
 
-#define TPMS_NO_LIMIT	100
-#define TPMS_MAX_DIGITS	2	// TPM no. 0-99
-
 static void tpm2_token_dump(struct crypt_device *cd, const char *json)
 {
-	uint32_t nvindex, uuid_nvindex, pcrs, pcrbanks;
+	uint32_t nvindex, nonce_nvindex, pcrs, pcrbanks, version_major, version_minor;
 	size_t nvkey_size;
 	bool daprotect, pin;
+	char* nv_nonce;
 	char buf[1024], num[32];
 	unsigned i, n;
 
-	if (tpm2_token_read(cd, json, &nvindex, &uuid_nvindex, &pcrs, &pcrbanks,
+	if (tpm2_token_read(cd, json, &version_minor, &version_major, &nvindex, &nonce_nvindex, &nv_nonce, &pcrs, &pcrbanks,
 			    &daprotect, &pin, &nvkey_size)) {
 		l_err(cd, "Cannot read JSON token metadata.");
 		return;
 	}
 
-	l_std(cd, "\tNVindex:  0x%08" PRIx32 "\n", nvindex);
-	l_std(cd, "\tUUID NVindex:  0x%08" PRIx32 "\n", uuid_nvindex);
-	l_std(cd, "\tNVKey:    %zu [bytes]\n", nvkey_size);
+	l_std(cd, "\tTPM Token version:\t%" PRIx32 ".%" PRIx32 "\n", version_minor, version_major);
+	l_std(cd, "\tPassphrase NVindex:\t0x%08" PRIx32 "\n", nvindex);
+	l_std(cd, "\tPassphrase size:\t%zu [bytes]\n", nvkey_size);
+	l_std(cd, "\tIdentification nonce NVindex:\t0x%08" PRIx32 "\n", nonce_nvindex);
+	//l_std(cd, "\tIdentification NV Nonce:\t'%s' [%d bytes]\n", nv_nonce, NV_NONCE_SIZE);
+	l_std(cd, "\tIdentification NV Nonce:\t");
+
+	for (i = 0; (i + 1) < strlen(nv_nonce); i += 2) {
+		if (i && i % 32 == 0)
+			l_std(cd, "\n\t                        \t");
+		l_std(cd, "%s%c%c", i % 32 == 0 ? "" : " ", nv_nonce[i], nv_nonce[i+1]);
+	}
+	l_std(cd, "\n");
 
 	for (*buf = '\0', n = 0, i = 0; i < 32; i++) {
 		if (!(pcrs & (1 << i)))
@@ -102,99 +114,8 @@ static void tpm2_token_dump(struct crypt_device *cd, const char *json)
 	if (pin)
 		strcat(buf, n++ ? ",PIN" : "PIN");
 	l_std(cd, "\tflags:    %s\n", buf);
-}
 
-static int tpm2_token_open_pin_with_tcti(struct crypt_device *cd,
-	int token,
-	const char *tpm_pass,
-	char **buffer,
-	size_t *buffer_len,
-	void *usrptr,
-	const char *tcti_spec)
-{
-	int r;
-	TSS2_RC tpm_rc;
-	ESYS_CONTEXT *ctx;
-	uint32_t nvindex, uuid_nvindex, pcrselection, pcrbanks;
-	size_t nvkey_size;
-	bool daprotect, pin;
-	const char *json;
-	size_t uuid_len;
-	char *uuid_buffer = NULL;
-
-	if (tpm_init(cd, &ctx, tcti_spec) != TSS2_RC_SUCCESS)
-		return -EACCES;
-
-	r = crypt_token_json_get(cd, token, &json);
-	if (r < 0) {
-		l_err(cd, "Cannot read JSON token metadata.");
-		goto out;
-	}
-
-	r = tpm2_token_read(cd, json, &nvindex, &uuid_nvindex, &pcrselection, &pcrbanks,
-			    &daprotect, &pin, &nvkey_size);
-	if (r < 0) {
-		l_err(cd, "Cannot read JSON token metadata.");
-		goto out;
-	}
-
-	if (pin && !tpm_pass) {
-		if (daprotect)
-			l_std(cd, "TPM stored password has dictionary attack protection turned on. "
-				  "Don't enter password too many times.\n");
-		r = -EAGAIN;
-		goto out;
-	}
-
-	uuid_len = strlen(crypt_get_uuid(cd));
-	uuid_buffer = calloc(1, uuid_len);
-	if (!uuid_buffer) {
-		 r = -ENOMEM;
-		 goto out;
-	}
-
-	tpm_rc = tpm_nv_read(cd, ctx, uuid_nvindex, NULL, 0, 0, CRYPT_TPM_PCRBANK_SHA1, uuid_buffer, uuid_len);
-	if (tpm_rc != TPM2_RC_SUCCESS) {
-		l_err(cd, "Failed to read UUID NV index, this TPM doesn't seem to hold the passphrase.");
-		LOG_TPM_ERR(cd, tpm_rc);
-		r = -EINVAL;
-		goto out;
-	}
-
-	if (strncmp(crypt_get_uuid(cd), uuid_buffer, uuid_len)) {
-		l_err(cd, "Bad UUID NV index content, this TPM doesn't hold the passphrase.");
-		l_dbg(cd, "Real UUID: '%s'", crypt_get_uuid(cd));
-		l_dbg(cd, "Read UUID: '%s'", uuid_buffer);
-		r = -EINVAL;
-		goto out;
-	}
-
-	*buffer = malloc(nvkey_size);
-	if (!(*buffer)) {
-		 r = -ENOMEM;
-		 goto out;
-	}
-	*buffer_len = nvkey_size;
-
-	r = -EACCES;
-
-	tpm_rc = tpm_nv_read(cd, ctx, nvindex, tpm_pass, tpm_pass ? strlen(tpm_pass) : 0,
-			   pcrselection, pcrbanks, *buffer, nvkey_size);
-
-	if (tpm_rc == TSS2_RC_SUCCESS) {
-		r = 0;
-	} else if (tpm_rc == (TPM2_RC_S | TPM2_RC_1 | TPM2_RC_BAD_AUTH) ||
-	           tpm_rc == (TPM2_RC_S | TPM2_RC_1 | TPM2_RC_AUTH_FAIL)) {
-		l_err(cd, "Failed to read passphrase NV index.");
-		LOG_TPM_ERR(cd, tpm_rc);
-		r = -EPERM;
-	}
-
-out:
-	if (uuid_buffer)
-		free(uuid_buffer);
-	Esys_Finalize(&ctx);
-	return r;
+	free(nv_nonce);
 }
 
 static bool tpm2_verify_tcti_for_token(struct crypt_device *cd,
@@ -204,9 +125,10 @@ static bool tpm2_verify_tcti_for_token(struct crypt_device *cd,
 	int r;
 	bool is_valid = true;
 	const char *json;
-	uint32_t nvindex, uuid_nvindex;
-	size_t uuid_len;
-	char *uuid_buffer = NULL;
+	uint32_t nvindex, nonce_nvindex;
+	char *nv_nonce_str = NULL;
+	char *nv_nonce_from_tpm = NULL;
+	char *nv_nonce_from_tpm_str = NULL;
 
 	TSS2_RC tpm_rc;
 	ESYS_CONTEXT *ctx;
@@ -221,39 +143,46 @@ static bool tpm2_verify_tcti_for_token(struct crypt_device *cd,
 		goto out;
 	}
 
-	r = tpm2_token_read(cd, json, &nvindex, &uuid_nvindex, NULL, NULL,
+	r = tpm2_token_read(cd, json, NULL, NULL, &nvindex, &nonce_nvindex, &nv_nonce_str, NULL, NULL,
 			    NULL, NULL, NULL);
-	if (r < 0) {
+	if (r < 0 || !nv_nonce_str) {
 		l_err(cd, "Cannot read JSON token metadata.");
 		is_valid = false;
 		goto out;
 	}
 
-	uuid_len = strlen(crypt_get_uuid(cd));
-	uuid_buffer = calloc(1, uuid_len);
-	if (!uuid_buffer) {
+	nv_nonce_from_tpm = calloc(1, NV_NONCE_SIZE);
+	if (!nv_nonce_from_tpm) {
 		is_valid = false;
 		goto out;
 	}
 
-	tpm_rc = tpm_nv_read(cd, ctx, uuid_nvindex, NULL, 0, 0, CRYPT_TPM_PCRBANK_SHA1, uuid_buffer, uuid_len);
+	tpm_rc = tpm_nv_read(cd, ctx, nonce_nvindex, NULL, 0, 0, CRYPT_TPM_PCRBANK_SHA1, nv_nonce_from_tpm, NV_NONCE_SIZE);
 	if (tpm_rc != TPM2_RC_SUCCESS) {
-		l_dbg(cd, "Failed to read UUID NV index, this TPM doesn't seem to hold the passphrase.");
+		l_dbg(cd, "Failed to read NV nonce, this TPM doesn't seem to hold the passphrase.");
 		LOG_TPM_ERR(cd, tpm_rc);
 		is_valid = false;
 		goto out;
 	}
 
-	if (strncmp(crypt_get_uuid(cd), uuid_buffer, uuid_len)) {
-		l_dbg(cd, "Bad UUID NV index content, this TPM doesn't hold the passphrase.");
-		l_dbg(cd, "Real UUID: '%s'", crypt_get_uuid(cd));
-		l_dbg(cd, "TPM-stored UUID: '%s'", uuid_buffer);
+	nv_nonce_from_tpm_str = bytes_to_hex(nv_nonce_from_tpm, NV_NONCE_SIZE);
+
+	if (strncmp(nv_nonce_from_tpm_str, nv_nonce_str, NV_NONCE_SIZE)) {
+		l_dbg(cd, "Bad NV nonce content, this TPM doesn't hold the passphrase.");
+		l_dbg(cd, "Nonce from header: '%s'", nv_nonce_str);
+		l_dbg(cd, "TPM-stored nonce: '%s'", nv_nonce_from_tpm_str);
 		is_valid = false;
 		goto out;
 	}
 out:
-	if (uuid_buffer) {
-		free(uuid_buffer);
+	if (nv_nonce_str) {
+		free(nv_nonce_str);
+	}
+	if (nv_nonce_from_tpm) {
+		free(nv_nonce_from_tpm);
+	}
+	if (nv_nonce_from_tpm_str) {
+		free(nv_nonce_from_tpm_str);
 	}
 
 	Esys_Finalize(&ctx);
@@ -308,6 +237,75 @@ static char *tpm2_find_tcti_for_token(struct crypt_device *cd,
 	return NULL;
 }
 
+static int tpm2_token_open_pin_with_tcti(struct crypt_device *cd,
+	int token,
+	const char *tpm_pass,
+	char **buffer,
+	size_t *buffer_len,
+	void *usrptr,
+	const char *tcti_spec)
+{
+	int r;
+	TSS2_RC tpm_rc;
+	ESYS_CONTEXT *ctx;
+	uint32_t nvindex, pcrselection, pcrbanks;
+	size_t nvkey_size;
+	bool daprotect, pin;
+	const char *json;
+
+	if (!tpm2_verify_tcti_for_token(cd, token, tcti_spec))
+		return -EINVAL;
+
+	if (tpm_init(cd, &ctx, tcti_spec) != TSS2_RC_SUCCESS)
+		return -EACCES;
+
+	r = crypt_token_json_get(cd, token, &json);
+	if (r < 0) {
+		l_err(cd, "Cannot read JSON token metadata.");
+		goto out;
+	}
+
+	r = tpm2_token_read(cd, json, NULL, NULL, &nvindex, NULL, NULL, &pcrselection, &pcrbanks,
+			    &daprotect, &pin, &nvkey_size);
+	if (r < 0) {
+		l_err(cd, "Cannot read JSON token metadata.");
+		goto out;
+	}
+
+	if (pin && !tpm_pass) {
+		if (daprotect)
+			l_std(cd, "TPM stored password has dictionary attack protection turned on. "
+				  "Don't enter password too many times.\n");
+		r = -EAGAIN;
+		goto out;
+	}
+
+	*buffer = malloc(nvkey_size);
+	if (!(*buffer)) {
+		 r = -ENOMEM;
+		 goto out;
+	}
+	*buffer_len = nvkey_size;
+
+	r = -EACCES;
+
+	tpm_rc = tpm_nv_read(cd, ctx, nvindex, tpm_pass, tpm_pass ? strlen(tpm_pass) : 0,
+			   pcrselection, pcrbanks, *buffer, nvkey_size);
+
+	if (tpm_rc == TSS2_RC_SUCCESS) {
+		r = 0;
+	} else if (tpm_rc == (TPM2_RC_S | TPM2_RC_1 | TPM2_RC_BAD_AUTH) ||
+	           tpm_rc == (TPM2_RC_S | TPM2_RC_1 | TPM2_RC_AUTH_FAIL)) {
+		l_err(cd, "Failed to read passphrase NV index.");
+		LOG_TPM_ERR(cd, tpm_rc);
+		r = -EPERM;
+	}
+
+out:
+	Esys_Finalize(&ctx);
+	return r;
+}
+
 static int tpm2_token_open_pin(struct crypt_device *cd,
 	int token,
 	const char *tpm_pass,
@@ -346,7 +344,7 @@ struct tpm2_context {
 	const char *tcti_str;
 	uint32_t tpmbanks;
 	uint32_t tpmnv;
-	uint32_t tpmuuid_nv;
+	uint32_t tpmnonce_nv;
 	uint32_t tpmpcrs;
 	uint32_t pass_size;
 	ESYS_CONTEXT *ctx;
@@ -400,6 +398,16 @@ int crypt_token_handle_init(struct crypt_cli *cli, void **handle)
 void crypt_token_handle_free(void *handle)
 {
 	free(handle);
+}
+
+#define VERSION_STR(A,B) \
+do { \
+	return #A "." #B; \
+} while (0)
+
+const char *crypt_token_version(void)
+{
+	VERSION_STR(TOKEN_VERSION_MAJOR, TOKEN_VERSION_MINOR);
 }
 
 static const crypt_arg_list create_args[] = {
@@ -541,7 +549,10 @@ int crypt_token_validate_create_params(struct crypt_device *cd, void *handle)
 
 int crypt_token_create(struct crypt_device *cd, void *handle)
 {
-	char *existing_pass = NULL, *tpm_pin = NULL, *random_pass = NULL;
+	char *existing_pass = NULL, *tpm_pin = NULL;
+	char *random_pass = NULL;
+	char *nv_nonce = NULL;
+	char *nv_nonce_str = NULL;
 	size_t existing_pass_len, tpm_pin_len = 0;
 	int r;
 	bool supports_algs_for_pcrs;
@@ -561,9 +572,9 @@ int crypt_token_create(struct crypt_device *cd, void *handle)
 		return -EINVAL;
 
 	if (tc->tcti_str)
-		l_dbg(cd, "initializing with TCTI %s", tc->tcti_str);
+		l_dbg(cd, "Initializing Esys with TCTI %s", tc->tcti_str);
 	else
-		l_dbg(cd, "initializing with default TCTI");
+		l_dbg(cd, "Initializing Esys with default TCTI");
 
 	if (tpm_init(cd, &tc->ctx, tc->tcti_str) != TSS2_RC_SUCCESS)
 		return -EINVAL;
@@ -589,8 +600,24 @@ int crypt_token_create(struct crypt_device *cd, void *handle)
 	}
 
 	r = tpm_get_random(cd, tc->ctx, random_pass, tc->pass_size);
-	if (r < 0)
+	if (r < 0) {
+		l_err(cd, "Failed to retrieve random data for the TPM keyslot from the TPM.");
 		goto out;
+	}
+
+	nv_nonce = malloc(NV_NONCE_SIZE);
+	if (!nv_nonce) {
+		r = -ENOMEM;
+		goto out;
+	}
+
+	r = tpm_get_random(cd, tc->ctx, nv_nonce, NV_NONCE_SIZE);
+	if (r < 0) {
+		l_err(cd, "Failed to retrieve random data for the TPM NV nonce from the TPM.");
+		goto out;
+	}
+
+	nv_nonce_str = bytes_to_hex(nv_nonce, NV_NONCE_SIZE);
 
 	r = crypt_cli_get_key("Enter existing LUKS2 pasphrase:",
 			  &existing_pass, &existing_pass_len,
@@ -613,9 +640,9 @@ int crypt_token_create(struct crypt_device *cd, void *handle)
 	}
 
 
-	r = tpm_nv_find_and_write(cd, tc->ctx,  &tc->tpmuuid_nv, crypt_get_uuid(cd), strlen(crypt_get_uuid(cd)), NULL, 0,CRYPT_TPM_PCRBANK_SHA1, 0, false);
+	r = tpm_nv_find_and_write(cd, tc->ctx,  &tc->tpmnonce_nv, nv_nonce, NV_NONCE_SIZE, NULL, 0,CRYPT_TPM_PCRBANK_SHA1, 0, false);
 	if (r < 0) {
-		l_err(cd, "Failed to write disk UUID to an NV index.");
+		l_err(cd, "Failed to write random identification nonce to an NV index.");
 		goto err_pass_nv_defined;
 	}
 
@@ -623,12 +650,12 @@ int crypt_token_create(struct crypt_device *cd, void *handle)
 	if (r < 0) {
 		if (r == -EPERM)
 			l_err(cd, "Wrong LUKS2 passphrase supplied.");
-		goto err_uuid_nv_defined;
+		goto err_nonce_nv_defined;
 	}
 	tc->keyslot = r;
 	l_std(cd, "Using keyslot %d.\n", tc->keyslot);
 
-	r = tpm2_token_add(cd, tc->token, tc->tpmnv, tc->tpmuuid_nv, tc->tpmpcrs, tc->tpmbanks, tc->tpmdaprotect, !tc->no_tpm_pin, tc->pass_size);
+	r = tpm2_token_add(cd, tc->token, TOKEN_VERSION_MAJOR, TOKEN_VERSION_MINOR, tc->tpmnv, tc->tpmnonce_nv, nv_nonce_str, tc->tpmpcrs, tc->tpmbanks, tc->tpmdaprotect, !tc->no_tpm_pin, tc->pass_size);
 	if (r < 0) {
 		goto err_keyslot_created;
 	}
@@ -650,16 +677,21 @@ int crypt_token_create(struct crypt_device *cd, void *handle)
 
 err_keyslot_created:
 	crypt_keyslot_destroy(cd, tc->keyslot);
-err_uuid_nv_defined:
-	tpm_nv_undefine(cd, tc->ctx, tc->tpmuuid_nv);
-	tc->tpmuuid_nv = 0;
+err_nonce_nv_defined:
+	tpm_nv_undefine(cd, tc->ctx, tc->tpmnonce_nv);
+	tc->tpmnonce_nv = 0;
 err_pass_nv_defined:
 	tpm_nv_undefine(cd, tc->ctx, tc->tpmnv);
 	tc->tpmnv = 0;
 out:
-	crypt_safe_free(random_pass);
-	crypt_safe_free(existing_pass);
-	crypt_safe_free(tpm_pin);
+	if(nv_nonce)
+		free(nv_nonce);
+	if (random_pass)
+		crypt_safe_free(random_pass);
+	if (existing_pass)
+		crypt_safe_free(existing_pass);
+	if (tpm_pin)
+		crypt_safe_free(tpm_pin);
 
 	Esys_Finalize(&tc->ctx);
 	return r;
