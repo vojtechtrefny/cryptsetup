@@ -33,6 +33,12 @@ if INTEGRITYSETUP
 TESTS += integrity-compat-test
 endif
 
+if CLI_TOKENS
+if SSHPLUGIN_TOKEN
+TESTS += ssh-plugin-test
+endif
+endif
+
 EXTRA_DIST = compatimage.img.xz compatv10image.img.xz \
 	compatimage2.img.xz \
 	conversion_imgs.tar.xz \
@@ -72,7 +78,8 @@ EXTRA_DIST = compatimage.img.xz compatv10image.img.xz \
 	blkid-luks2-pv.img.xz \
 	Makefile.localtest \
 	bitlk-compat-test \
-	bitlk-images.tar.xz
+	bitlk-images.tar.xz \
+	ssh-plugin-test
 
 CLEANFILES = cryptsetup-tst* valglog* *-fail-*.log
 clean-local:

@@ -17,6 +17,8 @@ MAKE="make -j2"
 DUMP_CONFIG_LOG="short"
 export TS_OPT_parsable="yes"
 
+export RUN_SSH_PLUGIN_TEST=1
+
 function configure_travis
 {
 	./configure "$@"
@@ -38,6 +40,9 @@ function check_nonroot
 	configure_travis \
 		--enable-cryptsetup-reencrypt \
 		--enable-internal-sse-argon2 \
+		--enable-external-tokens \
+		--enable-external-cli-tokens \
+		--enable-ssh-token \
 		"$cfg_opts" \
 		|| return
 
@@ -52,9 +57,12 @@ function check_root
 
 	[ -z "$cfg_opts" ] && return
 
-    configure_travis \
+	configure_travis \
 		--enable-cryptsetup-reencrypt \
 		--enable-internal-sse-argon2 \
+		--enable-external-tokens \
+		--enable-external-cli-tokens \
+		--enable-ssh-token \
 		"$cfg_opts" \
 		|| return
 
@@ -105,6 +113,8 @@ function travis_install_script
 		dkms \
 		linux-headers-$(uname -r) \
 		linux-modules-extra-$(uname -r) \
+		libssh-dev \
+		sshpass \
 		|| return
 
 	# For VeraCrypt test
