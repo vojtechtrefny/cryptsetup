@@ -629,8 +629,8 @@ TSS2_RC getPCRsCapability(struct crypt_device *cd, ESYS_CONTEXT *ctx, TPMS_CAPAB
 			memmove(&(*savedPCRs)->data.assignedPCR.pcrSelections[current_count],
 					currentPCRs->data.assignedPCR.pcrSelections,
 					currentPCRs->data.assignedPCR.count * sizeof(currentPCRs->data.assignedPCR.pcrSelections[0]));
-			free(currentPCRs);
 			current_count += currentPCRs->data.assignedPCR.count;
+			free(currentPCRs);
 		} else {
 			*savedPCRs = currentPCRs;
 			current_count = currentPCRs->data.assignedPCR.count;
