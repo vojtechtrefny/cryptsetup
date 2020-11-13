@@ -2553,21 +2553,20 @@ static int _token_add(struct crypt_device *cd)
 	}
 
 	token = r;
-	tools_token_msg(token, CREATED);
 
 	r = crypt_token_assign_keyslot(cd, token, ARG_INT32(OPT_KEY_SLOT_ID));
 	if (r < 0) {
 		log_err(_("Failed to assign token %d to keyslot %d."), token, ARG_INT32(OPT_KEY_SLOT_ID));
 		(void) crypt_token_json_set(cd, token, NULL);
+		return r;
 	}
 
-	return r;
+	return token;
 }
 
 static int _token_remove(struct crypt_device *cd)
 {
 	crypt_token_info token_info;
-	int r;
 
 	token_info = crypt_token_status(cd, ARG_INT32(OPT_TOKEN_ID_ID), NULL);
 	if (token_info < CRYPT_TOKEN_INACTIVE) {
@@ -2578,10 +2577,7 @@ static int _token_remove(struct crypt_device *cd)
 		return -EINVAL;
 	}
 
-	r = crypt_token_json_set(cd, ARG_INT32(OPT_TOKEN_ID_ID), NULL);
-	tools_token_msg(r, REMOVED);
-
-	return r;
+	return crypt_token_json_set(cd, ARG_INT32(OPT_TOKEN_ID_ID), NULL);
 }
 
 static int _token_import(struct crypt_device *cd)
@@ -2614,17 +2610,17 @@ static int _token_import(struct crypt_device *cd)
 	}
 
 	token = r;
-	tools_token_msg(token, CREATED);
 
 	if (ARG_INT32(OPT_KEY_SLOT_ID) != CRYPT_ANY_SLOT) {
 		r = crypt_token_assign_keyslot(cd, token, ARG_INT32(OPT_KEY_SLOT_ID));
 		if (r < 0) {
 			log_err(_("Failed to assign token %d to keyslot %d."), token, ARG_INT32(OPT_KEY_SLOT_ID));
 			(void) crypt_token_json_set(cd, token, NULL);
+			return r;
 		}
 	}
 
-	return r;
+	return token;
 }
 
 static int _token_export(struct crypt_device *cd)
@@ -2658,13 +2654,16 @@ static int action_token(void)
 
 	r = -EINVAL;
 
-	if (!strcmp(action_argv[0], "add"))
+	if (!strcmp(action_argv[0], "add")) {
 		r = _token_add(cd); /* adds only luks2-keyring type */
-	else if (!strcmp(action_argv[0], "remove"))
+		tools_token_msg(r, CREATED);
+	} else if (!strcmp(action_argv[0], "remove")) {
 		r = _token_remove(cd);
-	else if (!strcmp(action_argv[0], "import"))
+		tools_token_msg(r, REMOVED);
+	} else if (!strcmp(action_argv[0], "import")) {
 		r = _token_import(cd);
-	else if (!strcmp(action_argv[0], "export"))
+		tools_token_msg(r, CREATED);
+	} else if (!strcmp(action_argv[0], "export"))
 		r = _token_export(cd);
 
 	crypt_free(cd);
