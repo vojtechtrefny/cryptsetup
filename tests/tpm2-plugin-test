@@ -48,9 +48,9 @@ format() # format
 
 skip()
 {
-        echo "TEST SKIPPED: $1"
-        cleanup
-        exit 77
+	echo "TEST SKIPPED: $1"
+	cleanup
+	exit 77
 }
 
 function bin_check()
