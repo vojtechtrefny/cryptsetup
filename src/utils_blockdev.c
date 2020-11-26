@@ -317,3 +317,23 @@ out:
 	blk_free(h);
 	return r;
 }
+
+#define same_inode(buf1, buf2) \
+	((buf1).st_ino == (buf2).st_ino && \
+	 (buf1).st_dev == (buf2).st_dev)
+
+int tools_devices_identical(const char *dev1, const char *dev2)
+{
+	struct stat st_dev1, st_dev2;
+
+	if (!dev1 || !dev2)
+		return 0;
+
+	if (dev1 == dev2 || !strcmp(dev1, dev2))
+		return 1;
+
+	if (stat(dev1, &st_dev1) < 0 || stat(dev2, &st_dev2) < 0)
+		return -EINVAL;
+
+	return same_inode(st_dev1, st_dev2);
+}

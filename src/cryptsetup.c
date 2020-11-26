@@ -3086,6 +3086,23 @@ static int action_decrypt_luks2(struct crypt_device *cd)
 	};
 	size_t passwordLen;
 
+	if (!crypt_get_device_name(cd))
+		return -EINVAL;
+	if (!crypt_get_metadata_device_name(cd)) {
+		log_err(_("LUKS2 decryption is supported with detached header device only."));
+		return -ENOTSUP;
+	}
+
+	r = tools_devices_identical(crypt_get_metadata_device_name(cd), crypt_get_device_name(cd));
+	if (r) {
+		if (r > 0)
+			log_err(_("LUKS2 decryption is supported with detached header device only."));
+		else
+			log_dbg("Failed to compare header and data devices.");
+
+		return -ENOTSUP;
+	}
+
 	_set_reencryption_flags(&params.flags);
 
 	r = tools_get_key(NULL, &password, &passwordLen,

@@ -113,6 +113,8 @@ int tools_reencrypt_progress(uint64_t size, uint64_t offset, void *usrptr);
 int tools_read_json_file(struct crypt_device *cd, const char *file, char **json, size_t *json_size, bool batch_mode);
 int tools_write_json_file(struct crypt_device *cd, const char *file, const char *json);
 
+int tools_devices_identical(const char *header, const char *data);
+
 int tools_detect_signatures(const char *device, int ignore_luks, size_t *count, bool batch_mode);
 int tools_wipe_all_signatures(const char *path);
 
