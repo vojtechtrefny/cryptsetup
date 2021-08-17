@@ -7,11 +7,14 @@ on:
       - 'v2.3.x'
     paths-ignore:
       - 'docs/**'
+  pull_request:
+    branches:
+     - 'master'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    if: github.repository == 'mbroz/cryptsetup'
+    if: github.repository == 'vojtechtrefny/cryptsetup'
     strategy:
       fail-fast: false
       matrix:
